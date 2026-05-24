@@ -191,6 +191,17 @@ function sanitizeFtsQuery(queryText) {
     return baseSearch;
 }
 
+// Helper: Apply memory-saving pragmas to a SQLite connection
+function applyMemoryPragmas(db) {
+    db.serialize(() => {
+        db.run('PRAGMA cache_size = -8000');   // Limit page cache to 8MB
+        db.run('PRAGMA mmap_size = 0');         // Disable memory-mapped I/O
+        db.run('PRAGMA temp_store = FILE');     // Store temp tables on disk
+        db.run('PRAGMA page_size = 4096');
+    });
+    return db;
+}
+
 // Helper: Open SQLite connection in safe Read-Only mode
 function getDbConnection(premiumRequested = false) {
     let targetPath = DB_FREE_PATH;
@@ -204,15 +215,17 @@ function getDbConnection(premiumRequested = false) {
         }
     }
     
-    return new sqlite3.Database(targetPath, sqlite3.OPEN_READONLY, (err) => {
+    const db = new sqlite3.Database(targetPath, sqlite3.OPEN_READONLY, (err) => {
         if (err) console.error(`[DB ERROR] Could not open database at ${targetPath}:`, err.message);
     });
+    return applyMemoryPragmas(db);
 }
 
 function getStatutesDbConnection() {
-    return new sqlite3.Database(DB_STATUTES_PATH, sqlite3.OPEN_READONLY, (err) => {
+    const db = new sqlite3.Database(DB_STATUTES_PATH, sqlite3.OPEN_READONLY, (err) => {
         if (err) console.error(`[DB ERROR] Could not open database at ${DB_STATUTES_PATH}:`, err.message);
     });
+    return applyMemoryPragmas(db);
 }
 
 // Helper: Strip U+FFFD and literal diamond characters from all text fields server-side
