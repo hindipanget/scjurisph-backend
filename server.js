@@ -14,6 +14,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'philippine-law-search-super-secret
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_FREE_PATH = path.join(DATA_DIR, 'jurisprudence_free.db');
 const DB_PREMIUM_PATH = path.join(DATA_DIR, 'db_classic.db');
+const DB_SEARCH_PATH = path.join(DATA_DIR, 'db_recent.db');   // Full 1901–2026 search index
 const DB_STATUTES_PATH = path.join(DATA_DIR, 'db_statutes.db');
 const USERS_DB_PATH = path.join(DATA_DIR, 'users.db');
 
@@ -39,6 +40,7 @@ app.get('/', (req, res) => {
         status: 'ok', 
         service: 'SCJurisPH API',
         databases: {
+            search: fs.existsSync(DB_SEARCH_PATH),   // db_recent.db - 1901 to 2026
             free: fs.existsSync(DB_FREE_PATH),
             premium: fs.existsSync(DB_PREMIUM_PATH),
             statutes: fs.existsSync(DB_STATUTES_PATH),
@@ -202,17 +204,32 @@ function applyMemoryPragmas(db) {
     return db;
 }
 
-// Helper: Open SQLite connection in safe Read-Only mode
+// Helper: Open SQLite connection for CASE READING (respects premium/free paywall)
 function getDbConnection(premiumRequested = false) {
-    let targetPath = DB_FREE_PATH;
+    // For reading full cases, use the full search DB (db_recent.db covers 1901-2026)
+    // The paywall is enforced at the API level, not by DB selection
+    let targetPath = DB_SEARCH_PATH;
     
-    if (premiumRequested && fs.existsSync(DB_PREMIUM_PATH)) {
-        targetPath = DB_PREMIUM_PATH;
-    } else if (!fs.existsSync(DB_FREE_PATH)) {
-        // Fallback: If free doesn't exist but premium does
-        if (fs.existsSync(DB_PREMIUM_PATH)) {
-            targetPath = DB_PREMIUM_PATH;
-        }
+    // Fallback chain if db_recent.db not yet downloaded
+    if (!fs.existsSync(targetPath)) {
+        if (fs.existsSync(DB_FREE_PATH)) targetPath = DB_FREE_PATH;
+        else if (fs.existsSync(DB_PREMIUM_PATH)) targetPath = DB_PREMIUM_PATH;
+    }
+    
+    const db = new sqlite3.Database(targetPath, sqlite3.OPEN_READONLY, (err) => {
+        if (err) console.error(`[DB ERROR] Could not open database at ${targetPath}:`, err.message);
+    });
+    return applyMemoryPragmas(db);
+}
+
+// Helper: Open the FULL 1901-2026 search index for ALL users (search only — snippets)
+function getSearchDbConnection() {
+    let targetPath = DB_SEARCH_PATH;
+    
+    // Fallback chain if db_recent.db not yet downloaded
+    if (!fs.existsSync(targetPath)) {
+        if (fs.existsSync(DB_FREE_PATH)) targetPath = DB_FREE_PATH;
+        else if (fs.existsSync(DB_PREMIUM_PATH)) targetPath = DB_PREMIUM_PATH;
     }
     
     const db = new sqlite3.Database(targetPath, sqlite3.OPEN_READONLY, (err) => {
@@ -518,7 +535,8 @@ app.get('/api/search', optionalAuth, (req, res) => {
         if (searchType === 'statute') {
             db = getStatutesDbConnection();
         } else {
-            db = getDbConnection(isPremium);
+            // ALL users search the full 1901-2026 index — paywall is enforced at read time
+            db = getSearchDbConnection();
         }
     } catch (e) {
         return res.status(500).json({ error: 'Databases are not available.' });

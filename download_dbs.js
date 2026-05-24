@@ -6,9 +6,9 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const WORKER_URL = 'https://sc-search-api.hindipogi.workers.dev/api/internal/download/';
 
 const DATABASES = [
-    'jurisprudence_free.db',
-    'db_recent.db',
+    'db_recent.db',         // Full 1901-2026 search index (PRIORITY)
     'db_statutes.db',
+    'jurisprudence_free.db',
     'db_classic.db'
 ];
 
