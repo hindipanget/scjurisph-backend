@@ -6,8 +6,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --production
 
-# Copy server code
+# Copy server code and download script
 COPY server.js ./
+COPY download_dbs.js ./
 
 # Create data directory
 RUN mkdir -p /data
@@ -20,4 +21,4 @@ ENV PORT=10000
 ENV DATA_DIR=/data
 ENV NODE_ENV=production
 
-CMD ["node", "server.js"]
+CMD ["npm", "start"]
