@@ -4,6 +4,7 @@
   "description": "Philippine Law Search Engine - Backend API",
   "main": "server.js",
   "scripts": {
+    "prestart": "node download_dbs.js",
     "start": "node server.js",
     "dev": "node server.js 4321"
   },
