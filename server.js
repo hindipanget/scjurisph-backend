@@ -12,7 +12,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'philippine-law-search-super-secret
 
 // Database paths - use persistent disk on Render (/data) or local fallback
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const DB_FREE_PATH = path.join(DATA_DIR, 'db_recent.db');
+const DB_FREE_PATH = path.join(DATA_DIR, 'jurisprudence_free.db');
 const DB_PREMIUM_PATH = path.join(DATA_DIR, 'db_classic.db');
 const DB_STATUTES_PATH = path.join(DATA_DIR, 'db_statutes.db');
 const USERS_DB_PATH = path.join(DATA_DIR, 'users.db');

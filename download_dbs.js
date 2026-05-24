@@ -39,6 +39,7 @@ function downloadFile(filename) {
                 file.close();
                 fs.unlinkSync(dest); // Delete partial file
                 console.warn(`⚠️ [WARN] Could not download ${filename} (Status: ${response.statusCode})`);
+                response.resume(); // Consume the stream to free up memory/socket so Node can exit!
                 resolve(); // Don't reject, some DBs are optional
             }
         }).on('error', (err) => {
@@ -62,4 +63,6 @@ async function main() {
     console.log('========================================================');
 }
 
-main();
+main().then(() => {
+    process.exit(0);
+});
