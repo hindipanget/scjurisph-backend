@@ -10,6 +10,10 @@ const app = express();
 const PORT = process.env.PORT || 4321;
 const JWT_SECRET = process.env.JWT_SECRET || 'philippine-law-search-super-secret-key-2026';
 
+// Cloudflare KV Sync settings
+const CLOUDFLARE_WORKER_URL = 'https://sc-search-api.hindipogi.workers.dev';
+const CLOUDFLARE_ADMIN_SECRET = 'philippine-law-admin-sync-secret-2026';
+
 // Database paths - use persistent disk on Render (/data) or local fallback
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_FREE_PATH = path.join(DATA_DIR, 'jurisprudence_free.db');
@@ -80,7 +84,8 @@ function initUsersDb() {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 folder_id INTEGER,
-                item_id INTEGER NOT NULL,
+                folder_name TEXT,
+                item_id TEXT NOT NULL,
                 item_type TEXT DEFAULT 'jurisprudence',
                 title TEXT,
                 reference_num TEXT,
@@ -89,6 +94,9 @@ function initUsersDb() {
                 FOREIGN KEY(folder_id) REFERENCES folders(id)
             )
         `);
+        // Add folder_name column to existing bookmarks table if missing (migration)
+        db.run(`ALTER TABLE bookmarks ADD COLUMN folder_name TEXT`, () => {});
+        // Ensure item_id is TEXT (old schema used INTEGER) - handled by loose SQLite typing
         db.run(`
             CREATE TABLE IF NOT EXISTS clippings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,6 +348,21 @@ app.post('/api/auth/login', (req, res) => {
                 return res.status(401).json({ error: 'Invalid credentials' });
             }
             
+            // Check if promo access has expired
+            if (user.access_expires_at) {
+                const today = new Date().toISOString().split('T')[0];
+                if (user.access_expires_at < today) {
+                    db.close();
+                    return res.status(403).json({ 
+                        error: `Your promotional access expired on ${user.access_expires_at}. Please subscribe to continue.`,
+                        expired: true
+                    });
+                }
+            }
+
+            // Determine effective role (premium unless promo is somehow expired)
+            const effectiveRole = user.role;
+            
             const jti = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
             
             const token = jwt.sign(
@@ -355,7 +378,12 @@ app.post('/api/auth/login', (req, res) => {
                 res.json({ 
                     message: 'Login successful', 
                     token, 
-                    user: { id: user.id, username: user.username, role: user.role } 
+                    user: { 
+                        id: user.id, 
+                        username: user.username, 
+                        role: effectiveRole,
+                        access_expires_at: user.access_expires_at || null
+                    } 
                 });
             });
         });
@@ -434,20 +462,21 @@ app.get('/api/bookmarks/all', optionalAuth, (req, res) => {
 
 app.post('/api/bookmarks', optionalAuth, (req, res) => {
     if (!req.user.id) return res.status(401).json({ error: 'Unauthorized' });
-    const { folder_id, item_id, item_type, title, reference_num } = req.body;
+    const { folder_id, folder_name, item_id, item_type, title, reference_num } = req.body;
     if (!item_id) return res.status(400).json({ error: 'Item ID required' });
     
     const db = new sqlite3.Database(USERS_DB_PATH);
-    db.get('SELECT id FROM bookmarks WHERE user_id = ? AND item_id = ? AND item_type = ?', [req.user.id, item_id, item_type || 'jurisprudence'], (err, row) => {
+    db.get('SELECT id FROM bookmarks WHERE user_id = ? AND item_id = ? AND item_type = ?', [req.user.id, String(item_id), item_type || 'jurisprudence'], (err, row) => {
         if (row) {
             db.close();
-            return res.status(400).json({ error: 'Item already bookmarked' });
+            // Return existing bookmark id so client can store it
+            return res.json({ message: 'Already bookmarked', bookmark_id: row.id });
         }
         
         db.run(`
-            INSERT INTO bookmarks (user_id, folder_id, item_id, item_type, title, reference_num)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `, [req.user.id, folder_id || null, item_id, item_type || 'jurisprudence', title, reference_num], function(err) {
+            INSERT INTO bookmarks (user_id, folder_id, folder_name, item_id, item_type, title, reference_num)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [req.user.id, folder_id || null, folder_name || null, String(item_id), item_type || 'jurisprudence', title, reference_num], function(err) {
             db.close();
             if (err) return res.status(500).json({ error: 'Failed to bookmark' });
             res.json({ message: 'Bookmark added', bookmark_id: this.lastID });
@@ -936,41 +965,196 @@ app.get('/api/filters', optionalAuth, (req, res) => {
 });
 
 // Admin: Get All Users
-app.get('/api/admin/users', (req, res) => {
-    const db = new sqlite3.Database(USERS_DB_PATH, sqlite3.OPEN_READONLY);
-    db.all('SELECT id, username, role FROM users ORDER BY id DESC', [], (err, rows) => {
-        db.close();
-        if (err) return res.status(500).json({ error: 'Failed to fetch users' });
-        const enrichedRows = rows.map(r => ({
-            id: r.id,
-            email: r.username,
-            plan: r.role === 'premium' ? 'Lifetime Pass' : 'Free Plan',
-            access: r.role === 'premium' ? 'Active Premium' : 'Guest Free',
-            amount: r.role === 'premium' ? 1499 : 0,
-            date: '2026-05-20'
-        }));
-        res.json({ users: enrichedRows });
-    });
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        // Fetch users from Cloudflare KV live database
+        const kvRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/admin/kv-users`, {
+            headers: { 'Authorization': `Bearer ${CLOUDFLARE_ADMIN_SECRET}` }
+        });
+        
+        if (!kvRes.ok) throw new Error('Failed to fetch from Cloudflare KV');
+        
+        const data = await kvRes.json();
+        const kvUsers = data.users || [];
+        
+        const today = new Date().toISOString().split('T')[0];
+        
+        // Format to match admin UI
+        const enrichedRows = kvUsers.map((u, i) => {
+            const isExpired = u.access_expires_at && u.access_expires_at < today;
+            const isPromo   = !!u.access_expires_at;
+            
+            return {
+                id: i + 1, // Mock ID for sorting display
+                email: u.username,
+                plan: isPromo ? `Promo (expires ${u.access_expires_at})` : (u.role === 'premium' ? 'Lifetime Pass' : 'Free Plan'),
+                access: (u.role === 'premium' && !isExpired) ? 'Active Premium' : (isExpired ? 'Expired Promo' : (u.role === 'free' ? 'Guest Free' : u.role)),
+                amount: isPromo ? 0 : (u.role === 'premium' ? 1499 : 0),
+                date: u.created_at ? u.created_at.split('T')[0] : '2026-05-20',
+                expires: u.access_expires_at || null
+            };
+        });
+        
+        // Append local SQLite users as well just in case
+        const db = new sqlite3.Database(USERS_DB_PATH, sqlite3.OPEN_READONLY);
+        db.all('SELECT id, username, role, access_expires_at FROM users', [], (err, rows) => {
+            db.close();
+            if (!err) {
+                const localUsernames = new Set(enrichedRows.map(r => r.email));
+                rows.forEach(r => {
+                    if (!localUsernames.has(r.username)) {
+                        const isExpired = r.access_expires_at && r.access_expires_at < today;
+                        const isPromo   = !!r.access_expires_at;
+                        enrichedRows.push({
+                            id: 90000 + r.id, // Offset ID so it doesn't collide
+                            email: r.username,
+                            plan: isPromo ? `Promo [Local] (expires ${r.access_expires_at})` : (r.role === 'premium' ? 'Local Lifetime' : 'Local Free'),
+                            access: (r.role === 'premium' && !isExpired) ? 'Active Premium' : (isExpired ? 'Expired Promo' : 'Guest Free'),
+                            amount: 0,
+                            date: '2026-05-20',
+                            expires: r.access_expires_at || null
+                        });
+                    }
+                });
+            }
+            res.json({ users: enrichedRows });
+        });
+    } catch (err) {
+        console.error('KV fetch error:', err);
+        return res.status(500).json({ error: 'Failed to fetch users from Cloudflare KV', details: err.message });
+    }
 });
 
 // Admin: Create Promo Account
-app.post('/api/admin/users/create', (req, res) => {
-    const { username, password, role } = req.body;
+app.post('/api/admin/users/create', async (req, res) => {
+    const { username, password, role, access_expires_at } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
     
+    // First, push to Cloudflare KV
+    try {
+        const kvRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/admin/kv-users`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${CLOUDFLARE_ADMIN_SECRET}`
+            },
+            body: JSON.stringify({
+                accounts: [{ username, password, role, access_expires_at }]
+            })
+        });
+        
+        if (!kvRes.ok) {
+            const errBody = await kvRes.text();
+            throw new Error(`KV Sync Failed: ${errBody}`);
+        }
+    } catch (err) {
+        console.error('Cloudflare KV Sync error:', err);
+        return res.status(500).json({ error: 'Failed to sync account to live web database.', details: err.message });
+    }
+
+    // Then save locally
     const db = new sqlite3.Database(USERS_DB_PATH);
     bcrypt.hash(password, 10, (err, hash) => {
         if (err) return res.status(500).json({ error: 'Hashing failed' });
         
-        db.run('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)', [username, hash, role || 'premium'], function(err) {
-            db.close();
-            if (err) {
-                if (err.message.includes('UNIQUE constraint failed')) {
-                    return res.status(400).json({ error: 'Username already exists' });
+        db.run(
+            'INSERT INTO users (username, password_hash, role, access_expires_at) VALUES (?, ?, ?, ?)',
+            [username, hash, role || 'premium', access_expires_at || null],
+            function(err) {
+                db.close();
+                if (err) {
+                    if (err.message.includes('UNIQUE constraint failed')) {
+                        return res.status(400).json({ error: 'Username already exists locally, but was synced to Cloudflare.' });
+                    }
+                    return res.status(500).json({ error: 'Local database error, but synced to Cloudflare.' });
                 }
-                return res.status(500).json({ error: 'Database error' });
+                res.json({ message: 'Promo account created & synced successfully', userId: this.lastID });
             }
-            res.json({ message: 'Promo account created successfully', userId: this.lastID });
+        );
+    });
+});
+
+// Admin: Bulk Create Promo Accounts
+app.post('/api/admin/users/bulk-create', async (req, res) => {
+    const { seed, count, password, access_expires_at } = req.body;
+    
+    if (!seed || !count || !password) {
+        return res.status(400).json({ error: 'Seed, count, and password required' });
+    }
+    
+    const qty = parseInt(count, 10);
+    if (isNaN(qty) || qty < 1 || qty > 1000) {
+        return res.status(400).json({ error: 'Count must be between 1 and 1000' });
+    }
+
+    // Generate accounts list
+    const accountsCreated = [];
+    for (let i = 1; i <= qty; i++) {
+        const suffix = i.toString().padStart(3, '0');
+        accountsCreated.push({
+            username: `${seed}${suffix}`,
+            password,
+            role: 'premium',
+            access_expires_at: access_expires_at || null
+        });
+    }
+
+    // First, push bulk to Cloudflare KV
+    try {
+        const kvRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/admin/kv-users`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${CLOUDFLARE_ADMIN_SECRET}`
+            },
+            body: JSON.stringify({ accounts: accountsCreated })
+        });
+        
+        if (!kvRes.ok) {
+            const errBody = await kvRes.text();
+            throw new Error(`KV Bulk Sync Failed: ${errBody}`);
+        }
+    } catch (err) {
+        console.error('Cloudflare KV Bulk Sync error:', err);
+        return res.status(500).json({ error: 'Failed to sync bulk accounts to live web.', details: err.message });
+    }
+    
+    // Then save locally
+    bcrypt.hash(password, 10, (err, hash) => {
+        if (err) return res.status(500).json({ error: 'Hashing failed' });
+        
+        const db = new sqlite3.Database(USERS_DB_PATH);
+        
+        db.serialize(() => {
+            db.run('BEGIN TRANSACTION');
+            
+            const stmt = db.prepare(
+                'INSERT INTO users (username, password_hash, role, access_expires_at) VALUES (?, ?, ?, ?)'
+            );
+            let errorOccurred = false;
+            
+            for (const acc of accountsCreated) {
+                stmt.run([acc.username, hash, acc.role, acc.access_expires_at], function(err) {
+                    if (err) errorOccurred = true;
+                });
+            }
+            
+            stmt.finalize();
+            
+            db.run('COMMIT', (err) => {
+                db.close();
+                if (err || errorOccurred) {
+                    return res.json({ 
+                        warning: 'Synced to live web, but local SQLite bulk creation had some errors (e.g. duplicate username locally).',
+                        accounts: accountsCreated 
+                    });
+                }
+                
+                res.json({ 
+                    message: `Successfully generated and synced ${qty} premium promo accounts.`,
+                    accounts: accountsCreated
+                });
+            });
         });
     });
 });
