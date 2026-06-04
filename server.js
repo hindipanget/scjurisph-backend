@@ -552,7 +552,7 @@ app.delete('/api/clippings/:id', optionalAuth, (req, res) => {
 // =======================================================
 
 app.get('/api/search', optionalAuth, (req, res) => {
-    const isPremium = req.user.role === 'premium';
+    const isPremium = req.user.role === 'premium' || req.user.role === 'admin';
     const { q, year, ponente, page, limit, sortBy, type } = req.query;
     const searchType = type || 'jurisprudence';
     
@@ -789,7 +789,7 @@ function cleanGrNumberToDigits(grStr) {
 // Fetch Single Case Full-Text
 app.get('/api/case/:id', optionalAuth, (req, res) => {
     const { id } = req.params;
-    const isPremium = req.user.role === 'premium';
+    const isPremium = req.user.role === 'premium' || req.user.role === 'admin';
     
     const db = getDbConnection(isPremium);
     
@@ -880,7 +880,7 @@ app.get('/api/statutes/:type/:ref', optionalAuth, (req, res) => {
 // Fetch Case by G.R. Number (for hyperlink citation clicks)
 app.get('/api/case/gr/:gr', optionalAuth, (req, res) => {
     const { gr } = req.params;
-    const isPremium = req.user.role === 'premium';
+    const isPremium = req.user.role === 'premium' || req.user.role === 'admin';
     const db = getDbConnection(isPremium);
 
     const cleanGr = gr.replace(/[^\d]/g, '').trim();
@@ -940,7 +940,7 @@ app.get('/api/case/gr/:gr', optionalAuth, (req, res) => {
 
 // Dynamic Sidebar Filters Loader
 app.get('/api/filters', optionalAuth, (req, res) => {
-    const isPremium = req.user.role === 'premium';
+    const isPremium = req.user.role === 'premium' || req.user.role === 'admin';
     
     const db = getDbConnection(isPremium);
     
